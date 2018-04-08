@@ -12,6 +12,7 @@ from elasticsearch import Elasticsearch
 from elasticsearch import helpers
 
 from share.models import AbstractCreativeWork
+from share.models import CeleryTaskResult
 from share.models import WorkIdentifier
 from share.search import indexing
 
@@ -28,9 +29,19 @@ def safe_substr(value, length=32000):
 
 
 @celery.shared_task(bind=True)
-def update_elasticsearch(self, filter=None, index=None, models=None, setup=False, url=None, to_daemon=False):
+def update_elasticsearch(self, filter=None, index=None, models=None, setup=False, url=None, to_daemon=True, periodic=True):
     """
     """
+    if periodic:
+        dupe_task_qs = CeleryTaskResult.objects.filter(
+            task_name=self.name,
+            status=celery.states.STARTED
+        ).exclude(task_id=self.request.id)
+
+        if dupe_task_qs.exists():
+            logger.info('Another %s task is already running; let it work alone.', self.name)
+            return
+
     # TODO Refactor Elasitcsearch logic
     ElasticSearchBot(
         es_filter=filter,
@@ -142,8 +153,8 @@ def pseudo_bisection(self, es_url, es_index, min_date, max_date, dry=False, to_d
     MAX_DB_COUNT = 500
     MIN_MISSING_RATIO = 0.7
 
-    min_date = pendulum.instance(min_date)
-    max_date = pendulum.instance(max_date)
+    min_date = pendulum.parse(min_date)
+    max_date = pendulum.parse(max_date)
 
     logger.debug('Checking counts for %s to %s', min_date.format('%B %-d, %Y %I:%M:%S %p'), max_date.format('%B %-d, %Y %I:%M:%S %p'))
 
@@ -173,7 +184,12 @@ def pseudo_bisection(self, es_url, es_index, min_date, max_date, dry=False, to_d
             return
 
         logger.debug('dry=False, reindexing missing works')
-        task = update_elasticsearch.apply_async((), {'to_daemon': to_daemon, 'filter': {'date_created__range': [min_date, max_date]}})
+        task = update_elasticsearch.apply_async((), {
+            'filter': {'date_created__range': [min_date, max_date]},
+            'to_daemon': to_daemon,
+            'models': ['creativework'],
+            'periodic': False,
+        })
         logger.info('Spawned %r', task)
         return
 
@@ -184,7 +200,7 @@ def pseudo_bisection(self, es_url, es_index, min_date, max_date, dry=False, to_d
     for (_min, _max) in [(min_date, median_date), (median_date, max_date)]:
         logger.info('Starting bisection of %s to %s', _min.format('%B %-d, %Y %I:%M:%S %p'), _max.format('%B %-d, %Y %I:%M:%S %p'))
 
-        targs, tkwargs = (es_url, es_index, _min, _max), {'dry': dry}
+        targs, tkwargs = (es_url, es_index, str(_min), str(_max)), {'dry': dry, 'to_daemon': to_daemon}
 
         if getattr(self.request, 'is_eager', False):
             logger.debug('Running in an eager context. Running child tasks synchronously.')
@@ -194,7 +210,7 @@ def pseudo_bisection(self, es_url, es_index, min_date, max_date, dry=False, to_d
 
 
 @celery.shared_task(bind=True)
-def elasticsearch_janitor(self, es_url=None, es_index=None, dry=False, to_daemon=False):
+def elasticsearch_janitor(self, es_url=None, es_index=None, dry=False, to_daemon=True):
     """
     Looks for discrepancies between postgres and elastic search numbers
     Re-indexes time periods that differ in count
@@ -211,4 +227,4 @@ def elasticsearch_janitor(self, es_url=None, es_index=None, dry=False, to_daemon
     max_date = pendulum.utcnow()
     min_date = pendulum.instance(min_date)
 
-    pseudo_bisection.apply((es_url, es_index, min_date, max_date), {'dry': dry, 'to_daemon': to_daemon}, throw=True)
+    pseudo_bisection.apply((es_url, es_index, str(min_date), str(max_date)), {'dry': dry, 'to_daemon': to_daemon}, throw=True)

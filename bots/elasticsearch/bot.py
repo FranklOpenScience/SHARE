@@ -20,12 +20,12 @@ def chunk(iterable, size):
     iterable = iter(iterable)
     try:
         while True:
-            l = []
+            chunk = []
             for _ in range(size):
-                l.append(next(iterable))
-            yield l
+                chunk.append(next(iterable))
+            yield chunk
     except StopIteration:
-        yield l
+        yield chunk
 
 
 class ElasticSearchBot:
@@ -182,7 +182,7 @@ class ElasticSearchBot:
         self.es_models = kwargs.pop('es_models', None)
         self.es_setup = bool(kwargs.pop('es_setup', False))
         self.es_url = kwargs.pop('es_url', None) or settings.ELASTICSEARCH_URL
-        self.to_daemon = kwargs.pop('to_daemon', False)
+        self.to_daemon = kwargs.pop('to_daemon', True)
 
         if self.es_models:
             self.es_models = [x.lower() for x in self.es_models]
@@ -228,14 +228,6 @@ class ElasticSearchBot:
                     q = q | Q(subjects__date_modified__gt=most_recent_result) | Q(subject_relations__date_modified__gt=most_recent_result)
                 qs = model.objects.filter(q).values_list('id', flat=True)
 
-            count = qs.count()
-
-            if count < 1:
-                logger.info('Found 0 qualifying %ss', model)
-                continue
-            else:
-                logger.info('Found %s %s that must be updated in ES', count, model)
-
             for batch in chunk(qs.iterator(), chunk_size):
                 if batch:
                     if not self.to_daemon:
@@ -246,8 +238,9 @@ class ElasticSearchBot:
                         except ValueError:
                             logger.warning('Not sending model type %r to the SearchIndexer', model)
 
-        logger.info('Starting task to index sources')
-        tasks.index_sources.apply_async((), {'es_url': self.es_url, 'es_index': self.es_index})
+        if self.es_models and 'source' in self.es_models:
+            logger.info('Starting task to index sources')
+            tasks.index_sources.apply_async((), {'es_url': self.es_url, 'es_index': self.es_index})
 
     def setup(self):
         logger.debug('Ensuring Elasticsearch index %s', self.es_index)

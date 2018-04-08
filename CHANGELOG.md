@@ -1,5 +1,61 @@
 # Change Log
 
+# [2.15.6] - 2018-04-04
+* Fix PeerJ transformer error
+
+# [2.15.5] - 2018-03-15
+* Prevent infinite task loop for certain types of errors
+
+# [2.15.4] - 2018-03-15
+* Update raw data janitor to skip over datums from disabled/deleted sources
+
+# [2.15.3] - 2018-03-15
+* Fix bug in fixpreprintdisambiguations command
+
+# [2.15.2] - 2018-03-12
+* Fix a broken test
+
+# [2.15.1] - 2018-03-12
+* Fix some time-sensitive tests
+
+# [2.15.0] - 2018-03-05
+## Ingest architecture
+* Add IngestJob, used to keep track of a RawDatum's ingestion status
+    * Exposed in API at `/api/v2/ingestjobs/`
+    * In the response to pushed data, include a link to the IngestJob
+* Rename HarvestLog to HarvestJob
+* Combine `transform` and `disambiguate` tasks into `ingest` task
+* Catch all errors caused by bad input data, store them on the IngestJob
+* Add Regulator, a place to put logic/transforms/validation that should
+  run on all data, regardless of source
+* Fix: Prevent indexer daemon threads from exiting when elasticsearch times out
+
+## Existing sources
+* Map work relation types in MODS transformer
+* Update edu.utah source config to include more approved sets
+* Update edu.umassmed source config to use HTTPS
+
+# [2.14.11] - 2018-02-26
+* Update pendulum dependency to avoid infinite janitor loop
+
+# [2.14.10] - 2018-02-26
+* Fix elasticsearch_janitor task
+    * Expect (and give) str arguments, avoiding error
+    * Use the indexer daemon by default
+
+# [2.14.9] - 2018-02-22
+* Speed up update_elasticsearch task:
+    * Don't count the works just for a log message
+    * Use the indexer daemon by default, instead of index_model tasks
+* Only run one update_elasticsearch task at a time
+
+# [2.14.8] - 2018-02-22
+* Add --delete-related and --superfluous flags to `enforce_set_lists`
+* Improve script output by including ids in ShareObject.__repr__
+
+# [2.14.7] - 2018-02-18
+* Devops updates for new environment
+
 # [2.14.6] - 2018-02-12
 * *Actually* speed up OAI feed
 

@@ -4,6 +4,7 @@ import logging
 import xmltodict
 
 from share.transform.chain import ChainTransformer, ctx, links as tools
+from share.transform.chain.exceptions import InvalidIRI
 from share.transform.chain.links import GuessAgentTypeLink
 from share.transform.chain.parsers import Parser
 from share.transform.chain.utils import force_text
@@ -18,6 +19,25 @@ def get_list(dct, key):
     return val if isinstance(val, list) else [val]
 
 
+#### Identifiers ####
+
+class MODSWorkIdentifier(Parser):
+    schema = 'WorkIdentifier'
+
+    uri = tools.RunPython(force_text, ctx)
+
+    class Extra:
+        identifier_type = tools.Try(ctx['@type'])
+
+
+class MODSAgentIdentifier(Parser):
+    schema = 'AgentIdentifier'
+
+    uri = ctx
+
+
+#### Agents ####
+
 class AffiliatedAgent(Parser):
     schema = tools.GuessAgentType(ctx, default='organization')
 
@@ -26,12 +46,6 @@ class AffiliatedAgent(Parser):
 
 class IsAffiliatedWith(Parser):
     related = tools.Delegate(AffiliatedAgent, ctx)
-
-
-class MODSAgentIdentifier(Parser):
-    schema = 'AgentIdentifier'
-
-    uri = ctx
 
 
 class MODSAgent(Parser):
@@ -49,7 +63,7 @@ class MODSAgent(Parser):
     identifiers = tools.Map(
         tools.Delegate(MODSAgentIdentifier),
         tools.Unique(tools.Map(
-            tools.Try(tools.IRI(), exceptions=(ValueError, )),
+            tools.Try(tools.IRI(), exceptions=(InvalidIRI, )),
             tools.Map(
                 tools.RunPython(force_text),
                 tools.Filter(
@@ -100,11 +114,19 @@ class MODSPersonSplitName(MODSAgent):
         return ' '.join([force_text(n) for n in name_parts if n.get('@type') == type])
 
 
-class MODSWorkIdentifier(Parser):
-    schema = 'WorkIdentifier'
+class MODSSimpleAgent(Parser):
+    schema = tools.GuessAgentType(ctx, default='organization')
 
-    uri = ctx
+    name = ctx
 
+
+class MODSSimplePublisher(Parser):
+    schema = 'Publisher'
+
+    agent = tools.Delegate(MODSSimpleAgent, ctx)
+
+
+#### Tags/Subjects ####
 
 class MODSSubject(Parser):
     schema = 'Subject'
@@ -130,15 +152,55 @@ class MODSThroughTags(Parser):
     tag = tools.Delegate(MODSTag, ctx)
 
 
-def work_parser(_):
+#### Work Relations ####
+
+RELATION_MAP = {
+    # 'preceding':
+    # 'succeeding':
+    'original': 'IsDerivedFrom',
+    'host': 'IsPartOf',
+    'constituent': 'IsPartOf',
+    'series': 'IsPartOf',
+    # 'otherVersion':
+    # 'otherFormat':
+    'isReferencedBy': 'References',
+    'references': 'References',
+    'reviewOf': 'Reviews',
+}
+REVERSE_RELATIONS = {
+    'isReferencedBy',
+    'constituent',
+}
+
+
+# Finds the generated subclass of MODSCreativeWork
+def related_work_parser(_):
     return type(next(p for p in ctx.parsers if isinstance(p, MODSCreativeWork)))
 
 
+def map_relation_type(obj):
+    return RELATION_MAP.get(obj['@type'], 'WorkRelation')
+
+
+class MODSReverseWorkRelation(Parser):
+    schema = tools.RunPython(map_relation_type)
+
+    subject = tools.Delegate(related_work_parser, ctx)
+
+
 class MODSWorkRelation(Parser):
-    schema = 'WorkRelation'
+    schema = tools.RunPython(map_relation_type)
 
-    related = tools.Delegate(work_parser, ctx)
+    related = tools.Delegate(related_work_parser, ctx)
 
+
+def work_relation_parser(obj):
+    if obj['@type'] in REVERSE_RELATIONS:
+        return MODSReverseWorkRelation
+    return MODSWorkRelation
+
+
+#### Agent-work relations ####
 
 def agent_parser(name):
     name_parts = get_list(name, 'mods:namePart')
@@ -175,17 +237,7 @@ class MODSPublisher(MODSAgentWorkRelation):
     schema = 'Publisher'
 
 
-class MODSSimpleAgent(Parser):
-    schema = tools.GuessAgentType(ctx, default='organization')
-
-    name = ctx
-
-
-class MODSSimplePublisher(Parser):
-    schema = 'Publisher'
-
-    agent = tools.Delegate(MODSSimpleAgent, ctx)
-
+#### Works ####
 
 class MODSCreativeWork(Parser):
     default_type = 'CreativeWork'
@@ -208,25 +260,19 @@ class MODSCreativeWork(Parser):
 
     identifiers = tools.Map(
         tools.Delegate(MODSWorkIdentifier),
-        tools.Unique(tools.Map(
-            tools.Try(tools.IRI(), exceptions=(ValueError, )),
-            tools.Map(
-                tools.RunPython(force_text),
-                tools.Filter(
-                    lambda obj: 'invalid' not in obj,
-                    tools.Concat(
-                        tools.Try(ctx['mods:identifier']),
-                        tools.Try(ctx.header['identifier']),
-                        tools.Try(ctx['mods:location']['mods:url']),
-                    )
-                )
+        tools.Filter(
+            lambda obj: 'invalid' not in obj,
+            tools.Concat(
+                tools.Try(ctx['mods:identifier']),
+                tools.Try(ctx.header['identifier']),
+                tools.Try(ctx['mods:location']['mods:url']),
             )
-        ))
+        )
     )
 
     related_works = tools.Concat(
         tools.Map(
-            tools.Delegate(MODSWorkRelation),
+            tools.Delegate(work_relation_parser),
             tools.Try(ctx['mods:relatedItem'])
         )
     )
@@ -450,27 +496,30 @@ class MODSTransformer(ChainTransformer):
         'author': 'creator',
     }
 
-    def get_root_parser(self, _):
+    def get_root_parser(self, unwrapped, emitted_type='creativework', type_map=None, role_map=None, **kwargs):
+        root_type_map = {
+            **{r.lower(): r for r in self.allowed_roots},
+            **{t.lower(): v for t, v in (type_map or {}).items()}
+        }
+        root_role_map = {
+            **{k: v for k, v in self.marc_roles.items()},
+            **{k.lower(): v.lower() for k, v in (role_map or {}).items()}
+        }
+
         class RootParser(MODSCreativeWork):
-            default_type = self.kwargs.get('emitted_type', 'creativework').lower()
-            type_map = {
-                **{r.lower(): r for r in self.allowed_roots},
-                **{t.lower(): v for t, v in self.kwargs.get('type_map', {}).items()}
-            }
-            role_map = {
-                **{k: v for k, v in self.marc_roles.items()},
-                **{k.lower(): v.lower() for k, v in self.kwargs.get('role_map', {}).items()}
-            }
+            default_type = emitted_type.lower()
+            type_map = root_type_map
+            role_map = root_role_map
 
         return RootParser
 
-    def do_transform(self, datum):
-        if not oai_allowed_by_sets(datum, self.kwargs.get('blocked_sets'), self.kwargs.get('approved_sets')):
+    def do_transform(self, datum, approved_sets=None, blocked_sets=None, **kwargs):
+        if not oai_allowed_by_sets(datum, blocked_sets, approved_sets):
             return (None, None)
-        return super().do_transform(datum)
+        return super().do_transform(datum, **kwargs)
 
-    def unwrap_data(self, data):
-        unwrapped_data = xmltodict.parse(data, process_namespaces=True, namespaces=self.kwargs.get('namespaces', self.NAMESPACES))
+    def unwrap_data(self, data, namespaces=None, **kwargs):
+        unwrapped_data = xmltodict.parse(data, process_namespaces=True, namespaces=(namespaces or self.NAMESPACES))
         return {
             **unwrapped_data['record'].get('metadata', {}).get('mods:mods', {}),
             'header': unwrapped_data['record']['header'],
